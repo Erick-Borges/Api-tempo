@@ -1,0 +1,96 @@
+const express = require('express');
+const axios = require('axios');
+const redis = require('redis');
+const app = express();
+const PORT = 3000;
+
+// Cria e conecta o cliente Redis
+const redisClient = redis.createClient({
+  socket: {
+    host: 'localhost',
+    port: 6379
+  }
+});
+
+// Conecta ao Redis e trata erros
+redisClient.connect().catch(err => {
+  console.error('Erro na conexão com Redis:', err);
+});
+
+// Endpoint GET /recommendation/{city}
+app.get('/recommendation/:city', async (req, res) => {
+    try {
+        const city = req.params.city;
+        const cacheKey = `weather:${city}`;
+
+        // 1. Tenta obter dados do cache
+        const cachedData = await redisClient.get(cacheKey);
+        
+        if (cachedData) {
+            console.log('Dados recuperados do cache');
+            const { city: cityName, temp } = JSON.parse(cachedData);
+            
+            // Gera a recomendação a partir do cache
+            let recommendation;
+            if (temp > 30) {
+                recommendation = "Hidrate-se e use protetor solar! Está quente!";
+            } else if (temp >= 15 && temp <= 30) {
+                recommendation = "Clima agradável. Aproveite!";
+            } else {
+                recommendation = "Está frio! Leve um casaco.";
+            }
+
+            return res.json({
+                city: cityName,
+                temperature: temp,
+                unit: "Celsius",
+                recommendation,
+                cached: true  // Indica que veio do cache
+            });
+        }
+
+        // 2. Se não tiver no cache, consulta a API B
+        const response = await axios.get(`http://localhost:3001/weather/${city}`);
+        const { city: cityName, temp } = response.data;
+
+        // Armazena no Redis por 5 minutos (300 segundos)
+        await redisClient.setEx(cacheKey, 300, JSON.stringify(response.data));
+
+        // Gera a recomendação
+        let recommendation;
+        if (temp > 30) {
+            recommendation = "Hidrate-se e use protetor solar! Está quente!";
+        } else if (temp >= 15 && temp <= 30) {
+            recommendation = "Clima agradável. Aproveite!";
+        } else {
+            recommendation = "Está frio! Leve um casaco.";
+        }
+
+        // Resposta final
+        res.json({
+            city: cityName,
+            temperature: temp,
+            unit: "Celsius",
+            recommendation,
+            cached: false  // Indica que não veio do cache
+        });
+
+    } catch (error) {
+        if (error.response && error.response.status === 404) {
+            res.status(404).json({ error: "Cidade não encontrada" });
+        } else {
+            console.error('Erro:', error);
+            res.status(500).json({ error: "Erro interno no servidor" });
+        }
+    }
+});
+
+// Fecha a conexão com Redis ao encerrar o servidor
+process.on('SIGINT', async () => {
+    await redisClient.quit();
+    process.exit();
+});
+
+app.listen(PORT, () => {
+    console.log(`API A (Recomendações) rodando em http://localhost:${PORT}`);
+});
